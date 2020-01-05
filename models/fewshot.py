@@ -116,31 +116,13 @@ class FewShotSeg(nn.Module):
             prototypes = [bg_prototype,] + fg_prototypes
             dist_2 = [self.calDist(qry_fts[:, epi], prototype) for prototype in prototypes]
             pred = torch.stack(dist_2, dim=1)
-            r5 = torch.unsqueeze(qurey_feature[4][0][epi], dim=0)
-            r4 = torch.unsqueeze(qurey_feature[3][0][epi], dim=0)
-            r3 = torch.unsqueeze(qurey_feature[2][0][epi], dim=0)
-            r2 = torch.unsqueeze(qurey_feature[1][0][epi], dim=0)
-            pre_mask_concat = torch.unsqueeze(pre_mask[0], dim=1)
-            # print(pre_mask_concat.shape)
-            # print(pre_mask[0].shape)
-            out_tmp = []
-            for i in range(obj_nums + 1):
-                part_pred = torch.stack([dist_2[i]]*16,dim=1)
-                out_tmp.append(self.decoder(r5, part_pred, r4, r3, r2, pre_mask_concat[[epi]]))
-            out_tmp = torch.cat(out_tmp,dim=1)
-            # print(out_tmp.shape)
-            outputs.append(out_tmp)
+            outputs.append(F.interpolate(pred, size=img_size, mode='bilinear'))
 
             # outputs.append(F.interpolate(pred, size=img_size, mode='bilinear'))
-            s_r5 = all_support_feature[4][0][epi]
-            s_r4 = all_support_feature[3][0][epi]
-            s_r3 = all_support_feature[2][0][epi]
-            s_r2 = all_support_feature[1][0][epi]
-            all_support = [s_r2,s_r3,s_r4,s_r5]
             ###### Prototype alignment loss ######
             if self.config['align'] and self.training:
                 align_loss_epi = self.alignLoss(qry_fts[:, epi], pred, supp_fts[:, :, epi],
-                                                fore_mask[:, :, epi], back_mask[:, :, epi],all_support)
+                                                fore_mask[:, :, epi], back_mask[:, :, epi])
                 align_loss += align_loss_epi
 
         output = torch.stack(outputs, dim=1)  # N x B x (1 + Wa) x H x W
@@ -194,7 +176,7 @@ class FewShotSeg(nn.Module):
         return fg_prototypes, bg_prototype
 
 
-    def alignLoss(self, qry_fts, pred, supp_fts, fore_mask, back_mask, all_support):
+    def alignLoss(self, qry_fts, pred, supp_fts, fore_mask, back_mask):
         """
         Compute the loss for the prototype alignment branch
 
@@ -215,8 +197,8 @@ class FewShotSeg(nn.Module):
         # Mask and get query prototype
         pred_mask = pred.argmax(dim=1, keepdim=True)  # N x 1 x H' x W'
         pre_mask  = pred_mask.type(torch.FloatTensor).cuda()
-
         binary_masks = [pred_mask == i for i in range(1 + n_ways)]
+        skip_ways = [i for i in range(n_ways) if binary_masks[i + 1].sum() == 0]
         pred_mask = torch.stack(binary_masks, dim=1).float()  # N x (1 + Wa) x 1 x H' x W'
         qry_prototypes = torch.sum(qry_fts.unsqueeze(1) * pred_mask, dim=(0, 3, 4))
         qry_prototypes = qry_prototypes / (pred_mask.sum((0, 3, 4)) + 1e-5)  # (1 + Wa) x C
@@ -229,11 +211,9 @@ class FewShotSeg(nn.Module):
             supp_dist = [self.calDist(img_fts, prototype) for prototype in qry_prototypes]
 
             out_tmp = []
-            for way in range(n_ways + 1):
-                part_pred = torch.stack([supp_dist[way]] * 16, dim=1)
-                out_tmp.append(self.decoder(all_support[3], part_pred, all_support[2], all_support[1],
-                                            all_support[0], pre_mask))
-
+            supp_pred = torch.stack(supp_dist, dim=1)
+            supp_pred = F.interpolate(supp_pred, size=fore_mask.shape[-2:],
+                                      mode='bilinear')
             # Construct the support Ground-Truth segmentation
             supp_label = torch.full_like(fore_mask[0, shot], 255,
                                          device=img_fts.device).long()
@@ -242,12 +222,12 @@ class FewShotSeg(nn.Module):
             supp_label[back_mask[0, shot] == 1] = 0
             out_tmp = torch.cat(out_tmp, dim=1)
             supp_label = supp_label.view(1,1,321,321)
-            supp_label = supp_label.type(torch.FloatTensor).cuda()
-            supp_label = F.interpolate(supp_label,size=[480,854],mode="bilinear")
+            # supp_label = supp_label.type(torch.FloatTensor).cuda()
+            # supp_label = F.interpolate(supp_label,size=[480,854],mode="bilinear")
             supp_label = supp_label.type(torch.LongTensor).cuda()
             # Compute Loss
 
             loss = loss + F.cross_entropy(
-                out_tmp, supp_label[0], ignore_index=255) / n_shots
+                supp_pred, supp_label[0], ignore_index=255) / n_shots
 
         return loss
